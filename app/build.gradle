@@ -12,3 +12,7 @@ android {
         versionName '0.1-test'
     }
 }
+
+dependencies {
+    implementation 'com.google.mlkit:face-detection:16.1.7'
+}
