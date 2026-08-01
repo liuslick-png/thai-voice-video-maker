@@ -324,8 +324,8 @@ public final class VideoRenderer {
                         b.width()*0.18f/bitmap.getWidth(), b.height()*0.07f/bitmap.getHeight());
             }
             return new MouthRegion((minX+maxX)*0.5f/bitmap.getWidth(), (minY+maxY)*0.5f/bitmap.getHeight(),
-                    Math.max(0.025f,(maxX-minX)*0.62f/bitmap.getWidth()),
-                    Math.max(0.012f,(maxY-minY)*1.45f/bitmap.getHeight()));
+                    Math.max(0.018f,(maxX-minX)*0.48f/bitmap.getWidth()),
+                    Math.max(0.008f,(maxY-minY)*0.62f/bitmap.getHeight()));
         } finally { detector.close(); }
     }
 
@@ -419,12 +419,12 @@ public final class VideoRenderer {
                 "uniform vec4 uMouth; uniform float uOpen;" +
                 "void main(){ vec2 d=(vTexCoord-uMouth.xy)/uMouth.zw;" +
                 "float ellipse=dot(d,d); vec2 warped=vTexCoord;" +
-                "if(ellipse<1.5){ warped.y=uMouth.y+(vTexCoord.y-uMouth.y)/(1.0+uOpen*0.95); }" +
+                "if(ellipse<1.15){ warped.y=uMouth.y+(vTexCoord.y-uMouth.y)/(1.0+uOpen*0.42); }" +
                 "vec4 color=texture2D(sTexture,warped);" +
-                "float inner=1.0-smoothstep(0.12+uOpen*0.10,0.20+uOpen*0.75,ellipse);" +
-                "inner*=smoothstep(0.06,0.28,uOpen);" +
-                "vec3 mouthColor=vec3(0.16,0.025,0.035);" +
-                "gl_FragColor=vec4(mix(color.rgb,mouthColor,inner*0.92),color.a); }";
+                "float inner=1.0-smoothstep(0.035+uOpen*0.015,0.075+uOpen*0.14,ellipse);" +
+                "inner*=smoothstep(0.18,0.55,uOpen);" +
+                "vec3 mouthColor=vec3(0.20,0.045,0.055);" +
+                "gl_FragColor=vec4(mix(color.rgb,mouthColor,inner*0.48),color.a); }";
         private final int program, texture;
         private final int positionHandle, texHandle, mouthHandle, openHandle;
         private final FloatBuffer vertices;
