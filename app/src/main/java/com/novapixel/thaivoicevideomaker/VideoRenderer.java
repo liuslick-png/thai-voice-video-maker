@@ -28,7 +28,7 @@ public final class VideoRenderer {
     private static final ExecutorService WORKER = Executors.newSingleThreadExecutor();
     private static final int WIDTH = 720, HEIGHT = 1280, FPS = 24;
 
-    public static void render(Context context, Uri image, File wav, Uri output, Callback callback) {
+    public static void render(Context context, Uri image, File wav, File output, Callback callback) {
         WORKER.execute(() -> {
             File video = new File(context.getCacheDir(), "silent-" + System.nanoTime() + ".mp4");
             File audio = new File(context.getCacheDir(), "audio-" + System.nanoTime() + ".m4a");
@@ -43,7 +43,7 @@ public final class VideoRenderer {
                 encodeVideo(source, seconds, video);
                 source.recycle();
                 encodeAudio(wav, info, audio);
-                mux(context, video, audio, output);
+                mux(video, audio, output);
                 callback.onSuccess();
             } catch (Exception e) {
                 callback.onError(e);
@@ -136,7 +136,7 @@ public final class VideoRenderer {
         Canvas canvas = new Canvas(target);
         canvas.drawColor(0xff101325);
         float base = Math.max(WIDTH / (float)source.getWidth(), HEIGHT / (float)source.getHeight());
-        float zoom = base * (1.00f + 0.035f * progress);
+        float motion = (float)Math.sin(progress * Math.PI);\n        float zoom = base * (1.00f + 0.11f * progress);
         float w = source.getWidth() * zoom, h = source.getHeight() * zoom;
         float left = (WIDTH - w) / 2f;
         float top = (HEIGHT - h) / 2f - HEIGHT * 0.012f * progress;
@@ -239,24 +239,22 @@ public final class VideoRenderer {
         muxer.release();
     }
 
-    private static void mux(Context context, File video, File audio, Uri output) throws Exception {
+    private static void mux(File video, File audio, File output) throws Exception {
         MediaExtractor videoEx = new MediaExtractor(), audioEx = new MediaExtractor();
         videoEx.setDataSource(video.getAbsolutePath());
         audioEx.setDataSource(audio.getAbsolutePath());
         int videoTrack = findTrack(videoEx, true), audioTrack = findTrack(audioEx, false);
         videoEx.selectTrack(videoTrack); audioEx.selectTrack(audioTrack);
-
-        try (ParcelFileDescriptor pfd = context.getContentResolver().openFileDescriptor(output, "rw")) {
-            if (pfd == null) throw new IllegalStateException("เปิดไฟล์ปลายทางไม่ได้");
-            MediaMuxer muxer = new MediaMuxer(pfd.getFileDescriptor(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        MediaMuxer muxer = new MediaMuxer(output.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+        try {
             int outVideo = muxer.addTrack(videoEx.getTrackFormat(videoTrack));
             int outAudio = muxer.addTrack(audioEx.getTrackFormat(audioTrack));
             muxer.start();
             copyTrack(videoEx, muxer, outVideo);
             copyTrack(audioEx, muxer, outAudio);
-            muxer.stop(); muxer.release();
+            muxer.stop();
         } finally {
-            videoEx.release(); audioEx.release();
+            muxer.release(); videoEx.release(); audioEx.release();
         }
     }
 
