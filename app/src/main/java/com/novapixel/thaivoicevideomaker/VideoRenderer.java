@@ -13,6 +13,16 @@ import android.media.MediaFormat;
 import android.media.MediaMuxer;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
+import android.opengl.EGL14;
+import android.opengl.EGLExt;
+import android.opengl.GLES20;
+import android.opengl.GLUtils;
+import android.opengl.EGLConfig;
+import android.opengl.EGLContext;
+import android.opengl.EGLDisplay;
+import android.opengl.EGLSurface;
+import android.view.Surface;
+import java.nio.FloatBuffer;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -56,59 +66,60 @@ public final class VideoRenderer {
 
     private static void encodeVideo(Bitmap source, double seconds, File file) throws Exception {
         MediaCodec codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
-        int color = chooseColor(codec);
         MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, WIDTH, HEIGHT);
-        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, color);
-        format.setInteger(MediaFormat.KEY_BIT_RATE, 2_500_000);
+        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+        format.setInteger(MediaFormat.KEY_BIT_RATE, 3_000_000);
         format.setInteger(MediaFormat.KEY_FRAME_RATE, FPS);
         format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
         codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
 
+        Surface codecSurface = codec.createInputSurface();
+        CodecInputSurface inputSurface = new CodecInputSurface(codecSurface);
+        inputSurface.makeCurrent();
+        TextureRenderer renderer = new TextureRenderer(source, WIDTH, HEIGHT);
         MediaMuxer muxer = new MediaMuxer(file.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
         codec.start();
+
         int track = -1;
         boolean started = false;
         MediaCodec.BufferInfo outInfo = new MediaCodec.BufferInfo();
         int frames = Math.max(FPS, (int)Math.ceil(seconds * FPS));
-        Bitmap frame = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888);
-        byte[] yuv = new byte[WIDTH * HEIGHT * 3 / 2];
 
         for (int i = 0; i < frames; i++) {
-            int input = codec.dequeueInputBuffer(20_000);
-            if (input >= 0) {
-                drawFrame(source, frame, i / (float)Math.max(1, frames - 1));
-                argbToYuv(frame, yuv, color);
-                ByteBuffer buffer = codec.getInputBuffer(input);
-                buffer.clear();
-                buffer.put(yuv);
-                codec.queueInputBuffer(input, 0, yuv.length, i * 1_000_000L / FPS, 0);
-            } else { i--; }
+            float progress = i / (float)Math.max(1, frames - 1);
+            renderer.draw(progress);
+            inputSurface.setPresentationTime(i * 1_000_000_000L / FPS);
+            if (!inputSurface.swapBuffers()) throw new IllegalStateException("ส่งภาพเข้าเครื่องเข้ารหัสไม่ได้");
             DrainResult dr = drain(codec, muxer, track, started, outInfo, false);
-            track = dr.track; started = dr.started;
+            track = dr.track;
+            started = dr.started;
         }
 
-        int input;
-        do { input = codec.dequeueInputBuffer(20_000); } while (input < 0);
-        codec.queueInputBuffer(input, 0, 0, frames * 1_000_000L / FPS, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-
+        codec.signalEndOfInputStream();
         boolean eos = false;
         while (!eos) {
             int out = codec.dequeueOutputBuffer(outInfo, 20_000);
             if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                 if (started) throw new IllegalStateException("รูปแบบวิดีโอเปลี่ยนซ้ำ");
-                track = muxer.addTrack(codec.getOutputFormat()); muxer.start(); started = true;
+                track = muxer.addTrack(codec.getOutputFormat());
+                muxer.start();
+                started = true;
             } else if (out >= 0) {
                 ByteBuffer buffer = codec.getOutputBuffer(out);
                 if (outInfo.size > 0 && started) {
-                    buffer.position(outInfo.offset); buffer.limit(outInfo.offset + outInfo.size);
+                    buffer.position(outInfo.offset);
+                    buffer.limit(outInfo.offset + outInfo.size);
                     muxer.writeSampleData(track, buffer, outInfo);
                 }
                 eos = (outInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
                 codec.releaseOutputBuffer(out, false);
             }
         }
-        frame.recycle();
-        codec.stop(); codec.release();
+
+        renderer.release();
+        inputSurface.release();
+        codec.stop();
+        codec.release();
         if (started) muxer.stop();
         muxer.release();
     }
@@ -276,6 +287,133 @@ public final class VideoRenderer {
             info.offset = 0; info.size = size; info.presentationTimeUs = ex.getSampleTime(); info.flags = ex.getSampleFlags();
             muxer.writeSampleData(track, buffer, info);
             ex.advance();
+        }
+    }
+
+    private static final class CodecInputSurface {
+        private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
+        private EGLContext context = EGL14.EGL_NO_CONTEXT;
+        private EGLSurface surface = EGL14.EGL_NO_SURFACE;
+        private final Surface androidSurface;
+
+        CodecInputSurface(Surface androidSurface) {
+            this.androidSurface = androidSurface;
+            display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+            int[] version = new int[2];
+            if (!EGL14.eglInitialize(display, version, 0, version, 1))
+                throw new IllegalStateException("เริ่มระบบกราฟิกไม่ได้");
+            int[] attrs = {EGL14.EGL_RED_SIZE,8,EGL14.EGL_GREEN_SIZE,8,EGL14.EGL_BLUE_SIZE,8,
+                    EGL14.EGL_RENDERABLE_TYPE,EGL14.EGL_OPENGL_ES2_BIT,0x3142,1,EGL14.EGL_NONE};
+            EGLConfig[] configs = new EGLConfig[1];
+            int[] count = new int[1];
+            EGL14.eglChooseConfig(display, attrs, 0, configs, 0, 1, count, 0);
+            int[] contextAttrs = {EGL14.EGL_CONTEXT_CLIENT_VERSION,2,EGL14.EGL_NONE};
+            context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT, contextAttrs, 0);
+            int[] surfaceAttrs = {EGL14.EGL_NONE};
+            surface = EGL14.eglCreateWindowSurface(display, configs[0], androidSurface, surfaceAttrs, 0);
+        }
+
+        void makeCurrent() {
+            if (!EGL14.eglMakeCurrent(display, surface, surface, context))
+                throw new IllegalStateException("เปิดพื้นผิววิดีโอไม่ได้");
+        }
+        boolean swapBuffers() { return EGL14.eglSwapBuffers(display, surface); }
+        void setPresentationTime(long nanos) { EGLExt.eglPresentationTimeANDROID(display, surface, nanos); }
+        void release() {
+            if (display != EGL14.EGL_NO_DISPLAY) {
+                EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+                EGL14.eglDestroySurface(display, surface);
+                EGL14.eglDestroyContext(display, context);
+                EGL14.eglReleaseThread();
+                EGL14.eglTerminate(display);
+            }
+            androidSurface.release();
+        }
+    }
+
+    private static final class TextureRenderer {
+        private static final String VERTEX =
+                "attribute vec4 aPosition; attribute vec2 aTexCoord; varying vec2 vTexCoord;" +
+                "void main(){ gl_Position=aPosition; vTexCoord=aTexCoord; }";
+        private static final String FRAGMENT =
+                "precision mediump float; varying vec2 vTexCoord; uniform sampler2D sTexture;" +
+                "void main(){ gl_FragColor=texture2D(sTexture,vTexCoord); }";
+        private final int program, texture;
+        private final int positionHandle, texHandle;
+        private final FloatBuffer vertices;
+        private final FloatBuffer texCoords;
+        private final float fitX, fitY;
+
+        TextureRenderer(Bitmap bitmap, int outputWidth, int outputHeight) {
+            program = createProgram(VERTEX, FRAGMENT);
+            positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
+            texHandle = GLES20.glGetAttribLocation(program, "aTexCoord");
+            int[] ids = new int[1];
+            GLES20.glGenTextures(1, ids, 0);
+            texture = ids[0];
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+            GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bitmap, 0);
+
+            float imageAspect = bitmap.getWidth() / (float)bitmap.getHeight();
+            float outputAspect = outputWidth / (float)outputHeight;
+            if (imageAspect > outputAspect) { fitX = 1f; fitY = outputAspect / imageAspect; }
+            else { fitX = imageAspect / outputAspect; fitY = 1f; }
+            vertices = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            texCoords = ByteBuffer.allocateDirect(8 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            texCoords.put(new float[]{0f,1f, 1f,1f, 0f,0f, 1f,0f}).position(0);
+        }
+
+        void draw(float progress) {
+            GLES20.glViewport(0, 0, WIDTH, HEIGHT);
+            GLES20.glClearColor(0.063f, 0.075f, 0.145f, 1f);
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
+            float zoom = 1f + 0.08f * progress;
+            float x = Math.min(1.08f, fitX * zoom);
+            float y = Math.min(1.08f, fitY * zoom);
+            float pan = 0.025f * (float)Math.sin(progress * Math.PI);
+            vertices.clear();
+            vertices.put(new float[]{-x,-y+pan, x,-y+pan, -x,y+pan, x,y+pan}).position(0);
+            GLES20.glUseProgram(program);
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
+            GLES20.glEnableVertexAttribArray(positionHandle);
+            GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertices);
+            GLES20.glEnableVertexAttribArray(texHandle);
+            GLES20.glVertexAttribPointer(texHandle, 2, GLES20.GL_FLOAT, false, 0, texCoords);
+            GLES20.glDrawArrays(GLES20.GL_TRIANGLE_STRIP, 0, 4);
+            GLES20.glDisableVertexAttribArray(positionHandle);
+            GLES20.glDisableVertexAttribArray(texHandle);
+        }
+
+        void release() {
+            GLES20.glDeleteTextures(1, new int[]{texture}, 0);
+            GLES20.glDeleteProgram(program);
+        }
+        private static int createProgram(String vertex, String fragment) {
+            int vs = compile(GLES20.GL_VERTEX_SHADER, vertex);
+            int fs = compile(GLES20.GL_FRAGMENT_SHADER, fragment);
+            int p = GLES20.glCreateProgram();
+            GLES20.glAttachShader(p, vs);
+            GLES20.glAttachShader(p, fs);
+            GLES20.glLinkProgram(p);
+            int[] ok = new int[1];
+            GLES20.glGetProgramiv(p, GLES20.GL_LINK_STATUS, ok, 0);
+            if (ok[0] == 0) throw new IllegalStateException("เชื่อมระบบแสดงภาพไม่ได้");
+            GLES20.glDeleteShader(vs);
+            GLES20.glDeleteShader(fs);
+            return p;
+        }
+        private static int compile(int type, String source) {
+            int shader = GLES20.glCreateShader(type);
+            GLES20.glShaderSource(shader, source);
+            GLES20.glCompileShader(shader);
+            int[] ok = new int[1];
+            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, ok, 0);
+            if (ok[0] == 0) throw new IllegalStateException("เตรียมระบบแสดงภาพไม่ได้");
+            return shader;
         }
     }
 
