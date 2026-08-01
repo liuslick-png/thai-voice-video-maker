@@ -136,7 +136,8 @@ public final class VideoRenderer {
         Canvas canvas = new Canvas(target);
         canvas.drawColor(0xff101325);
         float base = Math.max(WIDTH / (float)source.getWidth(), HEIGHT / (float)source.getHeight());
-        float motion = (float)Math.sin(progress * Math.PI);\n        float zoom = base * (1.00f + 0.11f * progress);
+        float motion = (float)Math.sin(progress * Math.PI);
+        float zoom = base * (1.00f + 0.11f * progress);
         float w = source.getWidth() * zoom, h = source.getHeight() * zoom;
         float left = (WIDTH - w) / 2f + WIDTH * 0.025f * motion;
         float top = (HEIGHT - h) / 2f - HEIGHT * 0.045f * progress;
