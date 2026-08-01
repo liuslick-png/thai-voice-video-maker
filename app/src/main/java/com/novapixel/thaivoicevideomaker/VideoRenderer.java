@@ -138,8 +138,8 @@ public final class VideoRenderer {
         float base = Math.max(WIDTH / (float)source.getWidth(), HEIGHT / (float)source.getHeight());
         float motion = (float)Math.sin(progress * Math.PI);\n        float zoom = base * (1.00f + 0.11f * progress);
         float w = source.getWidth() * zoom, h = source.getHeight() * zoom;
-        float left = (WIDTH - w) / 2f;
-        float top = (HEIGHT - h) / 2f - HEIGHT * 0.012f * progress;
+        float left = (WIDTH - w) / 2f + WIDTH * 0.025f * motion;
+        float top = (HEIGHT - h) / 2f - HEIGHT * 0.045f * progress;
         Matrix matrix = new Matrix();
         matrix.postScale(zoom, zoom);
         matrix.postTranslate(left, top);
