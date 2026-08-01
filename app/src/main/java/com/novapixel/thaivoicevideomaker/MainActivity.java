@@ -5,6 +5,8 @@ import android.content.ContentValues;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.SurfaceTexture;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
@@ -13,16 +15,16 @@ import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.view.Gravity;
 import android.view.View;
+import android.view.Surface;
+import android.view.TextureView;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.MediaController;
 import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.VideoView;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -35,7 +37,8 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     private static final int PICK_IMAGE = 41;
     private Uri imageUri;
     private ImageView imagePreview;
-    private VideoView videoPreview;
+    private TextureView videoPreview;
+    private MediaPlayer previewPlayer;
     private EditText narration;
     private TextView status;
     private ProgressBar progress;
@@ -71,22 +74,10 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         mediaLp.bottomMargin = dp(12);
         root.addView(imagePreview, mediaLp);
 
-        videoPreview = new VideoView(this);
+        videoPreview = new TextureView(this);
         videoPreview.setVisibility(View.GONE);
-        videoPreview.setBackgroundColor(Color.BLACK);
+        videoPreview.setOpaque(true);
         root.addView(videoPreview, new LinearLayout.LayoutParams(-1, dp(285)));
-        MediaController controls = new MediaController(this);
-        controls.setAnchorView(videoPreview); videoPreview.setMediaController(controls);
-        videoPreview.setOnPreparedListener(player -> {
-            player.setVolume(1f, 1f);
-            player.setLooping(false);
-            videoPreview.start();
-        });
-        videoPreview.setOnCompletionListener(player -> {
-            videoPreview.pause();
-            videoPreview.seekTo(0);
-            status.setText("เล่นจบแล้ว • กดเล่นอีกครั้งหรือบันทึกวิดีโอ");
-        });
 
         LinearLayout playback = new LinearLayout(this);
         playback.setOrientation(LinearLayout.HORIZONTAL);
@@ -102,12 +93,13 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         root.addView(playback, new LinearLayout.LayoutParams(-1, -2));
         playButton.setOnClickListener(v -> {
             if (pendingVideo != null && pendingVideo.exists()) {
-                if (!videoPreview.isPlaying()) videoPreview.start();
+                if (previewPlayer == null) preparePreview();
+                else if (!previewPlayer.isPlaying()) previewPlayer.start();
                 status.setText("กำลังเล่นตัวอย่าง…");
             } else toast("กรุณาสร้างตัวอย่างก่อน");
         });
         stopButton.setOnClickListener(v -> {
-            if (videoPreview.isPlaying()) videoPreview.pause();
+            if (previewPlayer != null && previewPlayer.isPlaying()) previewPlayer.pause();
             status.setText("หยุดเล่นตัวอย่างแล้ว");
         });
 
@@ -151,7 +143,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             if (imageUri != null) {
                 try { getContentResolver().takePersistableUriPermission(imageUri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
                 catch (Exception ignored) {}
-                videoPreview.stopPlayback(); videoPreview.setVisibility(View.GONE); imagePreview.setVisibility(View.VISIBLE);
+                releasePreview(); videoPreview.setVisibility(View.GONE); imagePreview.setVisibility(View.VISIBLE);
                 imagePreview.setImageURI(imageUri); saveButton.setVisibility(View.GONE);
                 status.setText("เลือกภาพแล้ว • พร้อมสร้างตัวอย่าง");
             }
@@ -202,8 +194,8 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 runOnUiThread(() -> {
                     setBusy(false, "ตัวอย่างพร้อมแล้ว • กดเล่นเพื่อตรวจเสียงและภาพ");
                     imagePreview.setVisibility(View.GONE); videoPreview.setVisibility(View.VISIBLE);
-                    videoPreview.setVideoPath(pendingVideo.getAbsolutePath());
-                    videoPreview.start(); saveButton.setVisibility(View.VISIBLE);
+                    preparePreview();
+                    saveButton.setVisibility(View.VISIBLE);
                 });
             }
             @Override public void onError(Exception error) {
@@ -241,6 +233,62 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         });
     }
 
+    private void preparePreview() {
+        releasePreview();
+        if (pendingVideo == null || !pendingVideo.exists()) return;
+        if (videoPreview.isAvailable()) startTexturePlayback(videoPreview.getSurfaceTexture());
+        else {
+            videoPreview.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+                @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int width, int height) {
+                    startTexturePlayback(texture);
+                }
+                @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int width, int height) {}
+                @Override public boolean onSurfaceTextureDestroyed(SurfaceTexture texture) {
+                    releasePreview();
+                    return true;
+                }
+                @Override public void onSurfaceTextureUpdated(SurfaceTexture texture) {}
+            });
+        }
+    }
+
+    private void startTexturePlayback(SurfaceTexture texture) {
+        try {
+            releasePreview();
+            previewPlayer = new MediaPlayer();
+            Surface surface = new Surface(texture);
+            previewPlayer.setSurface(surface);
+            surface.release();
+            previewPlayer.setDataSource(pendingVideo.getAbsolutePath());
+            previewPlayer.setVolume(1f, 1f);
+            previewPlayer.setLooping(false);
+            previewPlayer.setOnPreparedListener(player -> {
+                player.start();
+                status.setText("กำลังเล่นตัวอย่าง…");
+            });
+            previewPlayer.setOnCompletionListener(player -> {
+                player.pause();
+                player.seekTo(0);
+                status.setText("เล่นจบแล้ว • กดเล่นอีกครั้งหรือบันทึกวิดีโอ");
+            });
+            previewPlayer.setOnErrorListener((player, what, extra) -> {
+                status.setText("เปิดตัวอย่างไม่ได้ แต่ยังสามารถบันทึกวิดีโอได้");
+                return true;
+            });
+            previewPlayer.prepareAsync();
+        } catch (Exception e) {
+            status.setText("เปิดตัวอย่างไม่ได้: " + e.getMessage());
+        }
+    }
+
+    private void releasePreview() {
+        if (previewPlayer != null) {
+            try { previewPlayer.stop(); } catch (Exception ignored) {}
+            previewPlayer.release();
+            previewPlayer = null;
+        }
+    }
+
     private void setBusy(boolean busy, String message) {
         createButton.setEnabled(!busy); saveButton.setEnabled(!busy);
         progress.setVisibility(busy ? View.VISIBLE : View.GONE); status.setText(message);
@@ -262,7 +310,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
     @Override protected void onDestroy() {
-        videoPreview.stopPlayback();
+        releasePreview();
         if (tts != null) { tts.stop(); tts.shutdown(); }
         if (pendingVideo != null) pendingVideo.delete();
         super.onDestroy();
