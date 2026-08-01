@@ -23,6 +23,15 @@ import android.opengl.EGLDisplay;
 import android.opengl.EGLSurface;
 import android.view.Surface;
 import java.nio.FloatBuffer;
+import android.graphics.PointF;
+import com.google.android.gms.tasks.Tasks;
+import com.google.mlkit.vision.common.InputImage;
+import com.google.mlkit.vision.face.Face;
+import com.google.mlkit.vision.face.FaceContour;
+import com.google.mlkit.vision.face.FaceDetection;
+import com.google.mlkit.vision.face.FaceDetector;
+import com.google.mlkit.vision.face.FaceDetectorOptions;
+import java.util.List;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -50,7 +59,10 @@ public final class VideoRenderer {
                     source = BitmapFactory.decodeStream(in);
                 }
                 if (source == null) throw new IllegalArgumentException("ไม่สามารถอ่านภาพได้");
-                encodeVideo(source, seconds, video);
+                MouthRegion mouth = detectMouth(source);
+                int frameCount = Math.max(FPS, (int)Math.ceil(seconds * FPS));
+                float[] mouthLevels = analyzeMouthLevels(wav, info, frameCount);
+                encodeVideo(source, seconds, video, mouth, mouthLevels);
                 source.recycle();
                 encodeAudio(wav, info, audio);
                 mux(video, audio, output);
@@ -64,7 +76,7 @@ public final class VideoRenderer {
         });
     }
 
-    private static void encodeVideo(Bitmap source, double seconds, File file) throws Exception {
+    private static void encodeVideo(Bitmap source, double seconds, File file, MouthRegion mouth, float[] mouthLevels) throws Exception {
         MediaCodec codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
         MediaFormat format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, WIDTH, HEIGHT);
         format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
@@ -76,7 +88,7 @@ public final class VideoRenderer {
         Surface codecSurface = codec.createInputSurface();
         CodecInputSurface inputSurface = new CodecInputSurface(codecSurface);
         inputSurface.makeCurrent();
-        TextureRenderer renderer = new TextureRenderer(source, WIDTH, HEIGHT);
+        TextureRenderer renderer = new TextureRenderer(source, WIDTH, HEIGHT, mouth);
         MediaMuxer muxer = new MediaMuxer(file.getAbsolutePath(), MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
         codec.start();
 
@@ -87,7 +99,7 @@ public final class VideoRenderer {
 
         for (int i = 0; i < frames; i++) {
             float progress = i / (float)Math.max(1, frames - 1);
-            renderer.draw(progress);
+            renderer.draw(progress, mouthLevels[Math.min(i, mouthLevels.length - 1)]);
             inputSurface.setPresentationTime(i * 1_000_000_000L / FPS);
             if (!inputSurface.swapBuffers()) throw new IllegalStateException("ส่งภาพเข้าเครื่องเข้ารหัสไม่ได้");
             DrainResult dr = drain(codec, muxer, track, started, outInfo, false);
@@ -290,6 +302,73 @@ public final class VideoRenderer {
         }
     }
 
+    private static MouthRegion detectMouth(Bitmap bitmap) throws Exception {
+        FaceDetectorOptions options = new FaceDetectorOptions.Builder()
+                .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+                .setContourMode(FaceDetectorOptions.CONTOUR_MODE_ALL)
+                .build();
+        FaceDetector detector = FaceDetection.getClient(options);
+        try {
+            List<Face> faces = Tasks.await(detector.process(InputImage.fromBitmap(bitmap, 0)));
+            if (faces.isEmpty()) throw new IllegalArgumentException("ไม่พบใบหน้า กรุณาใช้ภาพหน้าตรงที่เห็นใบหน้าชัด");
+            Face face = faces.get(0);
+            List<PointF> upper = face.getContour(FaceContour.UPPER_LIP_TOP).getPoints();
+            List<PointF> lower = face.getContour(FaceContour.LOWER_LIP_BOTTOM).getPoints();
+            float minX = Float.MAX_VALUE, maxX = -1, minY = Float.MAX_VALUE, maxY = -1;
+            for (PointF p : upper) { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); }
+            for (PointF p : lower) { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); }
+            if (maxX <= minX || maxY <= minY) {
+                android.graphics.Rect b = face.getBoundingBox();
+                return new MouthRegion(b.centerX()/ (float)bitmap.getWidth(),
+                        (b.top+b.height()*0.70f)/bitmap.getHeight(),
+                        b.width()*0.18f/bitmap.getWidth(), b.height()*0.07f/bitmap.getHeight());
+            }
+            return new MouthRegion((minX+maxX)*0.5f/bitmap.getWidth(), (minY+maxY)*0.5f/bitmap.getHeight(),
+                    Math.max(0.025f,(maxX-minX)*0.62f/bitmap.getWidth()),
+                    Math.max(0.012f,(maxY-minY)*1.45f/bitmap.getHeight()));
+        } finally { detector.close(); }
+    }
+
+    private static float[] analyzeMouthLevels(File wav, WavInfo info, int frames) throws Exception {
+        float[] raw = new float[frames];
+        long bytesPerFrame = Math.max(info.channels * 2L, info.dataSize / frames);
+        bytesPerFrame -= bytesPerFrame % (info.channels * 2L);
+        float peak = 1f;
+        try (RandomAccessFile in = new RandomAccessFile(wav, "r")) {
+            in.seek(info.dataOffset);
+            byte[] chunk = new byte[(int)Math.min(65536, Math.max(2048, bytesPerFrame))];
+            for (int i=0; i<frames; i++) {
+                long remaining = Math.min(bytesPerFrame, info.dataSize - (in.getFilePointer()-info.dataOffset));
+                long sum = 0; int samples = 0;
+                while (remaining > 1) {
+                    int want = (int)Math.min(chunk.length, remaining);
+                    int n = in.read(chunk,0,want);
+                    if (n <= 0) break;
+                    for (int p=0; p+1<n; p+=2) {
+                        short s=(short)((chunk[p]&255)|(chunk[p+1]<<8));
+                        sum += Math.abs((int)s); samples++;
+                    }
+                    remaining -= n;
+                }
+                raw[i] = samples == 0 ? 0f : sum/(float)samples;
+                peak = Math.max(peak, raw[i]);
+            }
+        }
+        float previous=0f;
+        for(int i=0;i<frames;i++) {
+            float normalized = raw[i]/peak;
+            float level = normalized < 0.045f ? 0f : Math.min(1f, (normalized-0.035f)*2.4f);
+            previous = previous*0.55f + level*0.45f;
+            raw[i] = previous;
+        }
+        return raw;
+    }
+
+    private static final class MouthRegion {
+        final float x,y,rx,ry;
+        MouthRegion(float x,float y,float rx,float ry){this.x=x;this.y=y;this.rx=rx;this.ry=ry;}
+    }
+
     private static final class CodecInputSurface {
         private EGLDisplay display = EGL14.EGL_NO_DISPLAY;
         private EGLContext context = EGL14.EGL_NO_CONTEXT;
@@ -337,17 +416,29 @@ public final class VideoRenderer {
                 "void main(){ gl_Position=aPosition; vTexCoord=aTexCoord; }";
         private static final String FRAGMENT =
                 "precision mediump float; varying vec2 vTexCoord; uniform sampler2D sTexture;" +
-                "void main(){ gl_FragColor=texture2D(sTexture,vTexCoord); }";
+                "uniform vec4 uMouth; uniform float uOpen;" +
+                "void main(){ vec2 d=(vTexCoord-uMouth.xy)/uMouth.zw;" +
+                "float ellipse=dot(d,d); vec2 warped=vTexCoord;" +
+                "if(ellipse<1.5){ warped.y=uMouth.y+(vTexCoord.y-uMouth.y)/(1.0+uOpen*0.95); }" +
+                "vec4 color=texture2D(sTexture,warped);" +
+                "float inner=1.0-smoothstep(0.12+uOpen*0.10,0.20+uOpen*0.75,ellipse);" +
+                "inner*=smoothstep(0.06,0.28,uOpen);" +
+                "vec3 mouthColor=vec3(0.16,0.025,0.035);" +
+                "gl_FragColor=vec4(mix(color.rgb,mouthColor,inner*0.92),color.a); }";
         private final int program, texture;
-        private final int positionHandle, texHandle;
+        private final int positionHandle, texHandle, mouthHandle, openHandle;
         private final FloatBuffer vertices;
         private final FloatBuffer texCoords;
         private final float fitX, fitY;
+        private final MouthRegion mouth;
 
-        TextureRenderer(Bitmap bitmap, int outputWidth, int outputHeight) {
+        TextureRenderer(Bitmap bitmap, int outputWidth, int outputHeight, MouthRegion mouth) {
+            this.mouth = mouth;
             program = createProgram(VERTEX, FRAGMENT);
             positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
             texHandle = GLES20.glGetAttribLocation(program, "aTexCoord");
+            mouthHandle = GLES20.glGetUniformLocation(program, "uMouth");
+            openHandle = GLES20.glGetUniformLocation(program, "uOpen");
             int[] ids = new int[1];
             GLES20.glGenTextures(1, ids, 0);
             texture = ids[0];
@@ -367,7 +458,7 @@ public final class VideoRenderer {
             texCoords.put(new float[]{0f,1f, 1f,1f, 0f,0f, 1f,0f}).position(0);
         }
 
-        void draw(float progress) {
+        void draw(float progress, float mouthOpen) {
             GLES20.glViewport(0, 0, WIDTH, HEIGHT);
             GLES20.glClearColor(0.063f, 0.075f, 0.145f, 1f);
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
@@ -378,6 +469,8 @@ public final class VideoRenderer {
             vertices.clear();
             vertices.put(new float[]{-x,-y+pan, x,-y+pan, -x,y+pan, x,y+pan}).position(0);
             GLES20.glUseProgram(program);
+            GLES20.glUniform4f(mouthHandle, mouth.x, mouth.y, mouth.rx, mouth.ry);
+            GLES20.glUniform1f(openHandle, mouthOpen);
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texture);
             GLES20.glEnableVertexAttribArray(positionHandle);
             GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertices);
