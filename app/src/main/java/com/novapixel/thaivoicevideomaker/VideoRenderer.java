@@ -135,7 +135,7 @@ public final class VideoRenderer {
     private static void drawFrame(Bitmap source, Bitmap target, float progress) {
         Canvas canvas = new Canvas(target);
         canvas.drawColor(0xff101325);
-        float base = Math.max(WIDTH / (float)source.getWidth(), HEIGHT / (float)source.getHeight());
+        float base = Math.min(WIDTH / (float)source.getWidth(), HEIGHT / (float)source.getHeight());
         float motion = (float)Math.sin(progress * Math.PI);
         float zoom = base * (1.00f + 0.11f * progress);
         float w = source.getWidth() * zoom, h = source.getHeight() * zoom;
@@ -160,8 +160,7 @@ public final class VideoRenderer {
         int[] pixels = new int[WIDTH * HEIGHT];
         bitmap.getPixels(pixels, 0, WIDTH, 0, 0, WIDTH, HEIGHT);
         int frame = WIDTH * HEIGHT, y = 0, u = frame, v = frame + frame / 4, uv = frame;
-        boolean semi = colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar ||
-                colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible;
+        boolean semi = colorFormat == MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar;
         for (int row = 0; row < HEIGHT; row++) {
             for (int col = 0; col < WIDTH; col++) {
                 int p = pixels[row * WIDTH + col];
