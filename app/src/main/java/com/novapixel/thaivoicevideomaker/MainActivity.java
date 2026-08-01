@@ -65,22 +65,50 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         subtitle.setGravity(Gravity.CENTER); subtitle.setPadding(0, dp(8), 0, dp(22)); root.addView(subtitle);
 
         imagePreview = new ImageView(this);
-        imagePreview.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imagePreview.setScaleType(ImageView.ScaleType.FIT_CENTER);
         imagePreview.setBackground(round(Color.rgb(40, 45, 76), 24));
-        LinearLayout.LayoutParams mediaLp = new LinearLayout.LayoutParams(-1, dp(390));
+        LinearLayout.LayoutParams mediaLp = new LinearLayout.LayoutParams(-1, dp(285));
         mediaLp.bottomMargin = dp(12);
         root.addView(imagePreview, mediaLp);
 
         videoPreview = new VideoView(this);
         videoPreview.setVisibility(View.GONE);
         videoPreview.setBackgroundColor(Color.BLACK);
-        root.addView(videoPreview, new LinearLayout.LayoutParams(-1, dp(390)));
+        root.addView(videoPreview, new LinearLayout.LayoutParams(-1, dp(285)));
         MediaController controls = new MediaController(this);
         controls.setAnchorView(videoPreview); videoPreview.setMediaController(controls);
         videoPreview.setOnPreparedListener(player -> {
             player.setVolume(1f, 1f);
-            player.setLooping(true);
+            player.setLooping(false);
             videoPreview.start();
+        });
+        videoPreview.setOnCompletionListener(player -> {
+            videoPreview.pause();
+            videoPreview.seekTo(0);
+            status.setText("เล่นจบแล้ว • กดเล่นอีกครั้งหรือบันทึกวิดีโอ");
+        });
+
+        LinearLayout playback = new LinearLayout(this);
+        playback.setOrientation(LinearLayout.HORIZONTAL);
+        playback.setGravity(Gravity.CENTER);
+        Button playButton = button("▶ เล่น", Color.rgb(44, 132, 104));
+        Button stopButton = button("■ หยุด", Color.rgb(163, 67, 78));
+        LinearLayout.LayoutParams half = new LinearLayout.LayoutParams(0, dp(50), 1f);
+        half.setMargins(dp(4), dp(4), dp(4), dp(10));
+        playback.addView(playButton, half);
+        LinearLayout.LayoutParams half2 = new LinearLayout.LayoutParams(0, dp(50), 1f);
+        half2.setMargins(dp(4), dp(4), dp(4), dp(10));
+        playback.addView(stopButton, half2);
+        root.addView(playback, new LinearLayout.LayoutParams(-1, -2));
+        playButton.setOnClickListener(v -> {
+            if (pendingVideo != null && pendingVideo.exists()) {
+                if (!videoPreview.isPlaying()) videoPreview.start();
+                status.setText("กำลังเล่นตัวอย่าง…");
+            } else toast("กรุณาสร้างตัวอย่างก่อน");
+        });
+        stopButton.setOnClickListener(v -> {
+            if (videoPreview.isPlaying()) videoPreview.pause();
+            status.setText("หยุดเล่นตัวอย่างแล้ว");
         });
 
         Button choose = button("① เลือกภาพบุคคลหน้าตรง", Color.rgb(75, 62, 150));
